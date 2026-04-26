@@ -717,17 +717,13 @@
                     <label>仓库名称</label>
                     <input type="text" class="form-input" id="repoName" placeholder="例如：my-notes">
                 </div>
-                <div class="form-group">
-                    <label>Issue 编号（同步到的 Issue）</label>
-                    <input type="number" class="form-input" id="issueNumber" placeholder="例如：1">
-                </div>
                 <div style="background:#f5f7fa;padding:12px;border-radius:8px;margin-top:16px;">
                     <div style="font-size:13px;color:#606266;margin-bottom:8px;">&#128161; 如何设置：</div>
                     <ol style="font-size:13px;color:#909399;padding-left:18px;line-height:1.8;">
                         <li>在 GitHub 创建或选择一个仓库</li>
-                        <li>在该仓库下创建一个 Issue 用于同步记录</li>
                         <li>生成 Personal Access Token（需 <code>repo</code> 或 <code>public_repo</code> 权限）</li>
-                        <li>填写以上信息并保存</li>
+                        <li>填写 Token、用户名、仓库名并保存</li>
+                        <li>首次同步时会自动在仓库中创建标题为"记录"的 Issue 用于存储数据</li>
                     </ol>
                 </div>
             </div>
@@ -812,7 +808,7 @@
             const res = await fetch(url, {
                 ...opts,
                 headers: {
-                    'Authorization': 'token ' + token,
+                    'Authorization': 'Bearer ' + token,
                     'Accept': 'application/vnd.github+json',
                     'Content-Type': 'application/json',
                     ...opts.headers
@@ -848,16 +844,21 @@
             btn.disabled = true;
 
             try {
-                const body = JSON.stringify({
+                const payload = JSON.stringify({
                     title: state.title,
                     projects: state.projects,
                     lastSync: now()
                 }, null, 2);
 
-                await githubApi('/repos/' + s.owner + '/' + s.repo + '/issues/' + s.issueNumber, {
+                const result = await githubApi('/repos/' + s.owner + '/' + s.repo + '/issues/' + s.issueNumber, {
                     method: 'PATCH',
-                    body: JSON.stringify({ body: body })
+                    body: JSON.stringify({ body: payload })
                 });
+
+                if (!result.body || result.body.length < 10) {
+                    showToast('同步异常：GitHub 未返回有效内容', 'error');
+                    return false;
+                }
 
                 state.hasUnsyncedChanges = false;
                 saveLocal();
@@ -885,7 +886,10 @@
 
             try {
                 const issue = await githubApi('/repos/' + s.owner + '/' + s.repo + '/issues/' + s.issueNumber);
-                if (!issue.body) return false;
+                if (!issue.body) {
+                    showToast('Issue 内容为空，请先在原浏览器推送一次数据', 'warning');
+                    return false;
+                }
 
                 try {
                     const data = JSON.parse(issue.body);
@@ -895,17 +899,20 @@
                     saveLocal();
                     updateSyncStatus();
                     renderProjects();
+                    console.log('[拉取成功] projects 数量:', state.projects.length, state.projects);
                     showToast('已同步最新数据', 'success');
                     return true;
                 } catch (e) {
+                    showToast('Issue 内容格式不正确，可能不是本工具创建的数据', 'error');
                     return false;
                 }
             } catch (err) {
                 if (err.message === 'TOKEN_EXPIRED') {
                     showToast('Token 已过期，请重新设置', 'error');
                     openSettings();
+                } else {
+                    showToast('拉取失败: ' + err.message, 'error');
                 }
-                console.error('Pull failed', err);
                 return false;
             }
         }
@@ -917,14 +924,26 @@
             btn.disabled = true;
 
             try {
-                const s = state.settings;
-                if (!s.token) throw new Error('请输入 Token');
-                if (!s.owner) throw new Error('请输入仓库 Owner');
-                if (!s.repo) throw new Error('请输入仓库名称');
-                if (!s.issueNumber) throw new Error('请输入 Issue 编号');
+                // 直接从输入框读取当前值，无需先保存
+                var token = $('githubToken').value.trim();
+                var owner = $('repoOwner').value.trim();
+                var repo = $('repoName').value.trim();
+                var issueNumber = $('issueNumber').value.trim();
 
-                const issue = await githubApi('/repos/' + s.owner + '/' + s.repo + '/issues/' + s.issueNumber);
-                showToast('连接成功！Issue 标题: ' + issue.title, 'success');
+                if (!token) throw new Error('请输入 Token');
+                if (!owner) throw new Error('请输入仓库 Owner');
+                if (!repo) throw new Error('请输入仓库名称');
+                if (!issueNumber) throw new Error('请输入 Issue 编号');
+
+                // 临时使用输入框的值进行测试
+                var savedToken = state.settings.token;
+                state.settings.token = token;
+                try {
+                    const issue = await githubApi('/repos/' + owner + '/' + repo + '/issues/' + issueNumber);
+                    showToast('连接成功！Issue 标题: ' + issue.title, 'success');
+                } finally {
+                    state.settings.token = savedToken;
+                }
             } catch (err) {
                 if (err.message === 'TOKEN_EXPIRED') {
                     showToast('Token 已过期', 'error');
@@ -1331,7 +1350,6 @@
             $('githubToken').value = state.settings.token;
             $('repoOwner').value = state.settings.owner;
             $('repoName').value = state.settings.repo;
-            $('issueNumber').value = state.settings.issueNumber;
             $('settingsModal').classList.add('active');
         }
         function closeSettingsModal() {
@@ -1341,7 +1359,6 @@
             state.settings.token = $('githubToken').value.trim();
             state.settings.owner = $('repoOwner').value.trim();
             state.settings.repo = $('repoName').value.trim();
-            state.settings.issueNumber = $('issueNumber').value.trim();
             saveLocal();
             closeSettingsModal();
             showToast('设置已保存', 'success');
@@ -1368,6 +1385,12 @@
         });
         $('syncBtn').addEventListener('click', function() { syncToGitHub(true); });
         $('pullBtn').addEventListener('click', async function() {
+            const s = state.settings;
+            if (!s.token || !s.owner || !s.repo || !s.issueNumber) {
+                showToast('请先完成 GitHub 设置', 'warning');
+                openSettings();
+                return;
+            }
             const btn = $('pullBtn');
             const originalText = btn.innerHTML;
             btn.innerHTML = '<span class="loading"></span> 拉取中...';
